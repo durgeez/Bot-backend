@@ -73,80 +73,83 @@ def load_pdf_text(path):
 
 PDF_TEXT = load_pdf_text(PDF_PATH) + "\n\n" + load_pdf_text(PDF_PATH_2)
 
-# === Match question to keywords in PDF ===
-def find_relevant_context(question: str, pdf_text: str, top_k: int = 5):
+# === Context matching functions ===
+def find_relevant_context_keywords(question: str, pdf_text: str, top_k: int = 5):
     q_low = question.lower()
     matched_keywords = [kw for kw in KEYWORDS if kw.lower() in q_low]
-
     potential_contexts = []
     for para in pdf_text.split("\n\n"):
-        para_low = para.lower()
-        score = sum(1 for kw in matched_keywords if kw.lower() in para_low)
+        score = sum(1 for kw in matched_keywords if kw.lower() in para.lower())
         if score > 0:
             potential_contexts.append((score, para))
-
     potential_contexts.sort(key=lambda x: x[0], reverse=True)
-    return "\n\n".join([p[1] for p in potential_contexts[:top_k]])
+    return [p[1] for p in potential_contexts[:top_k]]
+
+def find_relevant_context_semantic(question: str, pdf_text: str, top_k: int = 5):
+    words = [w for w in question.lower().split() if len(w) > 2]
+    potential_contexts = []
+    for para in pdf_text.split("\n\n"):
+        score = sum(1 for w in words if w in para.lower())
+        if score > 0:
+            potential_contexts.append((score, para))
+    potential_contexts.sort(key=lambda x: x[0], reverse=True)
+    return [p[1] for p in potential_contexts[:top_k]]
 
 @app.post("/chat")
 async def chat(request: Request):
     data = await request.json()
     question = data.get("question", "").strip()
-    image_size = data.get("image_size", "512x512")  # default size
+    image_size = data.get("image_size", "512x512")
 
     if not question:
         return JSONResponse({"answer": "Please enter a question."})
     if not PDF_TEXT.strip():
         return JSONResponse({"answer": "I don't know about that."})
 
-    # === Detect if user asks for an image ===
+    # Detect image request
     if re.search(r"\b(generate|create|show|make)\b.*\b(image|picture|diagram|visual)\b", question.lower()):
         return await generate_image(question, image_size)
 
-    # === Normal Q&A from PDF ===
-    relevant_context = find_relevant_context(question, PDF_TEXT)
-    if not relevant_context.strip():
+    # Try keyword first, then semantic
+    context = find_relevant_context_keywords(question, PDF_TEXT)
+    if not context:
+        context = find_relevant_context_semantic(question, PDF_TEXT)
+    if not context:
         return JSONResponse({"answer": "I don't know about that."})
+
+    relevant_context = "\n\n".join(context)
 
     try:
-        system_message = {
-            "role": "system",
-            "content": "You are a helpful assistant. Only answer using the provided PDF context. If the answer is not there, reply exactly: 'I don't know about that.'"
-        }
-
-        user_prompt = f"""
-        Context from the PDF:
-        {relevant_context}
-
-        Question: {question}
-        """
-
         response = client.chat.completions.create(
             model="gpt-4o-mini",
-            messages=[system_message, {"role": "user", "content": user_prompt}],
+            messages=[
+                {"role": "system", "content": "You are a helpful assistant. Only answer using the provided PDF context. If the answer is not there, reply exactly: 'I don't know about that.'"},
+                {"role": "user", "content": f"Context from the PDF:\n{relevant_context}\n\nQuestion: {question}"}
+            ],
             max_tokens=200
         )
-
         ai_answer = response.choices[0].message.content.strip()
         return JSONResponse({"answer": ai_answer})
-
     except Exception as e:
+        print(f"[ERROR] Chat failed: {e}")
         return JSONResponse({"answer": "Sorry, I couldn't process your request right now."})
 
-# === Image generation (restricted to keywords & PDF) ===
+# === Image generation (keyword + semantic fallback) ===
 async def generate_image(user_prompt: str, image_size: str):
-    relevant_context = find_relevant_context(user_prompt, PDF_TEXT, top_k=3)
-
-    if not relevant_context.strip():
+    context = find_relevant_context_keywords(user_prompt, PDF_TEXT, top_k=3)
+    if not context:
+        context = find_relevant_context_semantic(user_prompt, PDF_TEXT, top_k=3)
+    if not context:
         return JSONResponse({"answer": "I don't know about that."})
 
+    relevant_context = "\n\n".join(context)
     if image_size not in ["256x256", "512x512", "1024x1024"]:
         image_size = "512x512"
 
     try:
         img_resp = client.images.generate(
             model="gpt-image-1",
-            prompt=f"Generate an educational image strictly related to the following cybersecurity PDF context: {relevant_context}",
+            prompt=f"Generate an educational diagram strictly related to this cybersecurity PDF context:\n{relevant_context}\n\nUser request: {user_prompt}",
             size=image_size
         )
         image_url = img_resp.data[0].url
@@ -156,4 +159,5 @@ async def generate_image(user_prompt: str, image_size: str):
             "size": image_size
         })
     except Exception as e:
+        print(f"[ERROR] Image generation failed: {e}")
         return JSONResponse({"answer": "Sorry, I couldn't generate an image right now."})
