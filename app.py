@@ -5,6 +5,7 @@ from fastapi.responses import JSONResponse
 from PyPDF2 import PdfReader
 from openai import OpenAI
 import os, re
+import random
 
 app = FastAPI()
 
@@ -95,45 +96,6 @@ def find_relevant_context_semantic(question: str, pdf_text: str, top_k: int = 5)
     potential_contexts.sort(key=lambda x: x[0], reverse=True)
     return [p[1] for p in potential_contexts[:top_k]]
 
-@app.post("/chat")
-async def chat(request: Request):
-    data = await request.json()
-    question = data.get("question", "").strip()
-    image_size = data.get("image_size", "512x512")
-
-    if not question:
-        return JSONResponse({"answer": "Please enter a question."})
-    if not PDF_TEXT.strip():
-        return JSONResponse({"answer": "I don't know about that."})
-
-    # Detect image request
-    if re.search(r"\b(generate|create|show|make)\b.*\b(image|picture|diagram|visual)\b", question.lower()):
-        return await generate_image(question, image_size)
-
-    # Try keyword first, then semantic
-    context = find_relevant_context_keywords(question, PDF_TEXT)
-    if not context:
-        context = find_relevant_context_semantic(question, PDF_TEXT)
-    if not context:
-        return JSONResponse({"answer": "I don't know about that."})
-
-    relevant_context = "\n\n".join(context)
-
-    try:
-        response = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {"role": "system", "content": "You are a helpful assistant. Only answer using the provided PDF context. If the answer is not there, reply exactly: 'I don't know about that.'"},
-                {"role": "user", "content": f"Context from the PDF:\n{relevant_context}\n\nQuestion: {question}"}
-            ],
-            max_tokens=200
-        )
-        ai_answer = response.choices[0].message.content.strip()
-        return JSONResponse({"answer": ai_answer})
-    except Exception as e:
-        print(f"[ERROR] Chat failed: {e}")
-        return JSONResponse({"answer": "Sorry, I couldn't process your request right now."})
-
 # === Image generation (keyword + semantic fallback) ===
 async def generate_image(user_prompt: str, image_size: str):
     context = find_relevant_context_keywords(user_prompt, PDF_TEXT, top_k=3)
@@ -161,3 +123,57 @@ async def generate_image(user_prompt: str, image_size: str):
     except Exception as e:
         print(f"[ERROR] Image generation failed: {e}")
         return JSONResponse({"answer": "Sorry, I couldn't generate an image right now."})
+
+@app.post("/chat")
+async def chat(request: Request):
+    data = await request.json()
+    question = data.get("question", "").strip()
+    image_size = data.get("image_size", "512x512")
+
+    if not question:
+        return JSONResponse({"answer": "Please enter a question."})
+
+    # Handle greetings directly without emojis
+    greetings = ["hi", "hello", "good morning", "good afternoon", "good evening"]
+    if any(re.search(r'\b' + re.escape(g) + r'\b', question.lower()) for g in greetings):
+        response_options = [
+            "Hello! How can I assist you with cybersecurity today?",
+            "Hi there! I'm ready to answer your cybersecurity questions. What's on your mind?",
+            "Greetings! I'm a chatbot specializing in cybersecurity. How can I help?",
+        ]
+        return JSONResponse({"answer": random.choice(response_options)})
+
+    # Detect image request
+    if re.search(r"\b(generate|create|show|make)\b.*\b(image|picture|diagram|visual)\b", question.lower()):
+        return await generate_image(question, image_size)
+
+    # Use both keyword and semantic context
+    context = find_relevant_context_keywords(question, PDF_TEXT)
+    if not context:
+        context = find_relevant_context_semantic(question, PDF_TEXT)
+
+    relevant_context = "\n\n".join(context)
+
+    try:
+        # Updated system prompt for conversational tone and broader knowledge
+        system_prompt = (
+            "You are a cybersecurity expert chatbot. You will only answer questions about cybersecurity and related topics. "
+            "For specific questions, use the provided PDF context. If the context is not sufficient, use your general knowledge of cybersecurity. "
+            "If the question is not related to cybersecurity, politely state that you can only discuss cybersecurity topics and offer to help with a relevant question. "
+            "Be concise and professional. Do not invent information."
+        )
+        user_prompt = f"Question: {question}\n\n[Optional Context from PDF]:\n{relevant_context}"
+
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ],
+            max_tokens=200
+        )
+        ai_answer = response.choices[0].message.content.strip()
+        return JSONResponse({"answer": ai_answer})
+    except Exception as e:
+        print(f"[ERROR] Chat failed: {e}")
+        return JSONResponse({"answer": "Sorry, I couldn't process your request right now."})
