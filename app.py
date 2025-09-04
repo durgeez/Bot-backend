@@ -148,7 +148,7 @@ async def generate_image(user_prompt: str, image_size: str):
 
     try:
         img_resp = client.images.generate(
-            model="gpt-image-1",
+            model="dall-e-2",
             prompt=f"Generate an educational diagram strictly related to this cybersecurity PDF context:\n{relevant_context}\n\nUser request: {user_prompt}",
             size=image_size
         )
